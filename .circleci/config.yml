@@ -1,0 +1,118 @@
+version: 2.1
+
+# Full CI for this Rails app. This replaces the GitHub Actions workflow and mirrors bin/ci (config/ci.rb).
+
+functions:
+  setup-ruby: github.com/circleci-functions/setup-ruby@v0.3.0
+  setup-browser-tools: github.com/circleci-functions/setup-browser-tools@v0.5.0
+
+commands:
+  ruby-setup:
+    description: Check out the code, install the Ruby from .ruby-version, then install gems (cached on the Gemfile.lock checksum by the function).
+    steps:
+      - checkout
+      - setup-ruby:
+          with:
+            ruby-version-file: .ruby-version
+      - setup-ruby/install-gems
+
+jobs:
+  lint:
+    docker:
+      - image: cimg/base:stable
+    environment:
+      RUBOCOP_CACHE_ROOT: tmp/rubocop
+    steps:
+      - ruby-setup
+      - restore_cache:
+          keys:
+            - rubocop-v1-{{ checksum ".ruby-version" }}-{{ checksum ".rubocop.yml" }}-{{ checksum "Gemfile.lock" }}
+            - rubocop-v1-
+      - run:
+          name: Lint code for consistent style (RuboCop)
+          command: bin/rubocop
+      - save_cache:
+          key: rubocop-v1-{{ checksum ".ruby-version" }}-{{ checksum ".rubocop.yml" }}-{{ checksum "Gemfile.lock" }}
+          paths:
+            - tmp/rubocop
+
+  security:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - ruby-setup
+      - run:
+          name: Brakeman static analysis
+          command: bin/brakeman --quiet --no-pager --exit-on-warn --exit-on-error
+      - run:
+          name: Audit gems for known vulnerabilities
+          command: bin/bundler-audit
+      - run:
+          name: Audit importmap JavaScript packages
+          command: bin/importmap audit
+
+  test:
+    docker:
+      - image: cimg/base:stable
+    environment:
+      RAILS_ENV: test
+    steps:
+      - ruby-setup
+      - run:
+          name: Set up database
+          command: bin/rails db:test:prepare
+      - run:
+          name: Run tests
+          command: bin/rails test
+      # --- Smarter Testing (disabled for now) ---------------------------------------------
+      # To switch on CircleCI Smarter Testing later:
+      #   1. Run `circleci extension install testsuite` locally.
+      #   2. Add JUnit output for Minitest (for example the minitest-reporters gem), so results
+      #      show up under Tests and Insights.
+      #   3. Create .circleci/test-suites.yml with a suite like this one:
+      #        suites:
+      #          - name: rails
+      #            discover: find test -name '*_test.rb' -not -path 'test/system/*'
+      #            run: bin/rails test << test.atoms >>
+      #            outputs:
+      #              junit: test/reports/*.xml
+      #   4. Check it with `circleci testsuite doctor "rails"`.
+      #   5. Replace the "Run tests" step above with the step below.
+      #      Check the exact suite schema against the Smarter Testing docs before you enable it.
+      # - run:
+      #     name: Run tests (Smarter Testing)
+      #     command: circleci testsuite run "rails"
+      # - store_test_results:
+      #     path: test/reports
+      # ------------------------------------------------------------------------------------
+      - run:
+          name: Check seeds load cleanly
+          command: bin/rails db:seed:replant
+
+  system-test:
+    docker:
+      - image: cimg/base:stable
+    environment:
+      RAILS_ENV: test
+    steps:
+      - ruby-setup
+      - setup-browser-tools/install-chrome:
+          with:
+            version: latest
+      - run:
+          name: Set up database
+          command: bin/rails db:test:prepare
+      - run:
+          name: Run system tests
+          command: bin/rails test:system
+      - store_artifacts:
+          path: tmp/screenshots
+          destination: screenshots
+
+workflows:
+  ci:
+    jobs:
+      - lint
+      - security
+      - test
+      - system-test
